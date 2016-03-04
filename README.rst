@@ -4,28 +4,34 @@ LeoMuFundPicker project is mainly for Leo to pick up the proper Mutual Fund for 
 
 Code Example
 ============
-Show what the library does as concisely as possible, developers should be able to figure out **how** your project solves their problem by looking at the code example. Make sure the API you are showing off is obvious, and that your code is short and concise.
+Use the following command to download all the Mutual Fund and save to XLSX file. ::
+
+    LeoMuFundPicker --download=all
 
 Motivation
 ==========
-A short description of the motivation behind the creation and maintenance of the project. This should explain **why** the project exists.
+The reason why I start this project is that I am done with the Mutual Fund Representative to help to decide
+what kind of Mutual Fund to purchase, because I found they are just bullshit.
+And i want to do some useful Python project to practice coding. From this project I learn how to use urllib2, BeautifulSoup,
+click, openpyxl Python libraries.
 
 Installation
 ============
-LeoMuFundPicker can be installed by unzipping the source code in one directory and using this command: ::
+LeoMuFundPicker can be installed by unzipping the source code in one directory and using this command. ::
+
     python setup.py install
 
 API Reference
 =============
-Depending on the size of the project, if it is small and simple enough the reference docs can be added to the README. For medium size to larger projects it is important to at least provide a link to where the API reference docs live.
+None
 
 Tests
 =====
-Describe and show how to run the tests with code examples.
+None
 
 Contributors
 ============
-Let people know how they can dive into the project, include important links to things like issue trackers, irc, twitter accounts if applicable.
+Leo Deng
 
 License
 =======
