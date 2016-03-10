@@ -11,8 +11,33 @@ from bs4 import BeautifulSoup
 import re
 import os
 import sys
+import threading
 
 logger = logger.get_logger(__name__)
+
+
+def thread_func(downloader, thread_id, exporter):
+
+    logger.debug("Starting thread %d" % thread_id)
+
+    mutual_fund_id_count = len(downloader.mutual_fund_id_list)
+    start_pos = mutual_fund_id_count/20 * thread_id
+    end_pos = mutual_fund_id_count/20 * (thread_id+1)
+
+    for i in range(start_pos, end_pos):
+        if i >= len(downloader.mutual_fund_id_list):
+            return
+
+        mutual_fund_inst = downloader.save_mutual_fund_info(downloader.mutual_fund_id_list[i])
+        if mutual_fund_inst is None:
+            continue
+        exporter.write_mutual_fund_to_file(mutual_fund_inst, thread_id, i-start_pos)
+
+        downloader.lock.acquire()
+        downloader.current_finish_count += 1
+        sys.stdout.write("\rNow processing #%d Mutual Fund." % downloader.current_finish_count)
+        sys.stdout.flush()
+        downloader.lock.release()
 
 class Downloader:
 
@@ -29,7 +54,8 @@ class Downloader:
         self.totalMutualFundCount = 0
 
         self.mutual_fund_id_list = []
-        self.mutual_fund_inst_list = []
+        self.current_finish_count = 0
+        self.lock = threading.Lock()
 
     def __get_mutual_fund_page_count(self):
 
@@ -108,7 +134,7 @@ class Downloader:
         json.dump(self.mutual_fund_id_list, file_hdlr)
         file_hdlr.close()
 
-    def __save_mutual_fund_info(self, mutual_fund_id):
+    def save_mutual_fund_info(self, mutual_fund_id):
 
         logger.info("__save_mutual_fund_info() function entry. {'mutual_fund_id': %s}" % mutual_fund_id)
 
@@ -148,6 +174,8 @@ class Downloader:
 
                 # save Mutual Fund Head Portion
                 self.__save_mutual_fund_head_portion(mutual_fund_inst, get_parameter_dict)
+                if mutual_fund_inst.fund_name == "":
+                    return None
 
                 # save Mutual Fund Objective and Strategy Portion
                 self.__save_mutual_fund_obj_strategy_portion(mutual_fund_inst, get_parameter_dict)
@@ -156,101 +184,110 @@ class Downloader:
                 self.__save_mutual_fund_performance_portion(mutual_fund_inst, get_parameter_dict)
 
                 # save Mutual Fund Annual Performance Portion
-                self.__save_mutual_fund_annual_performance_portion(mutual_fund_inst, get_parameter_dict)
+                #self.__save_mutual_fund_annual_performance_portion(mutual_fund_inst, get_parameter_dict)
 
-                # Add mutual fund instance to list
-                self.mutual_fund_inst_list.append(mutual_fund_inst)
+                return mutual_fund_inst
 
     def __save_mutual_fund_head_portion(self, mutual_fund_inst, get_parameter_dict):
 
         logger.info(
             "__save_mutual_fund_head_portion() function entry. {'get_parameter_dict': %s}" % get_parameter_dict)
 
-        # Get mutual fund header portion
-        query_args = {"url": "http://quotes.morningstar.com/fund/c-header?",
-                              "t": get_parameter_dict["t"],
-                              "region": get_parameter_dict["region"],
-                              "culture": get_parameter_dict["culture"],
-                              "cur": get_parameter_dict["cur"],
-                              "productCode": get_parameter_dict["productCode"],
-                              "showtitle": "1"}
-        request = urllib2.Request(self.mutual_fund_info_url + "?" + urllib.urlencode(query_args))
-        request.add_header("User-Agent",
-                                   "Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/48.0.2564.116 Safari/537.36")
-        request.add_header("X-Requested-With",
-                                   "XMLHttpRequest")
-        logger.debug("Http request: %s" % request.get_full_url())
+        is_loop=True
+        retry_count = 0
+        while is_loop and retry_count < 100:
+            # Get mutual fund header portion
+            query_args = {"url": "http://quotes.morningstar.com/fund/c-header?",
+                                  "t": get_parameter_dict["t"],
+                                  "region": get_parameter_dict["region"],
+                                  "culture": get_parameter_dict["culture"],
+                                  "cur": get_parameter_dict["cur"],
+                                  "productCode": get_parameter_dict["productCode"],
+                                  "showtitle": "1"}
+            request = urllib2.Request(self.mutual_fund_info_url + "?" + urllib.urlencode(query_args))
+            request.add_header("User-Agent",
+                                       "Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/48.0.2564.116 Safari/537.36")
+            request.add_header("X-Requested-With",
+                                       "XMLHttpRequest")
+            logger.debug("Http request: %s" % request.get_full_url())
 
-        response = urllib2.urlopen(request)
-        mutual_fund_info_head_soup = BeautifulSoup(response.read(), "html.parser")
+            response = urllib2.urlopen(request)
+            mutual_fund_info_head_soup = BeautifulSoup(response.read(), "html.parser")
 
-        # Save fund name
-        fund_name_tag = mutual_fund_info_head_soup.find("h1")
-        fund_name_tag_str = unicode(fund_name_tag.string).lstrip().rstrip()
-        mutual_fund_inst.fund_name = fund_name_tag_str
-        logger.debug("Save fund name %s" % fund_name_tag_str)
+            # Save fund name
+            try:
+                fund_name_tag = mutual_fund_info_head_soup.find("h1")
+                fund_name_tag_str = unicode(fund_name_tag.string).lstrip().rstrip()
+                mutual_fund_inst.fund_name = fund_name_tag_str
+                logger.debug("Save fund name %s" % fund_name_tag_str)
+                is_loop=False
+            except:
+                is_loop=True
+                retry_count += 1
+                logger.error("Error parsing fund name. We got no choice but reparse.")
+                continue
 
-        # Save fund size
-        try:
-            total_assets_tag = mutual_fund_info_head_soup.find("span", vkey="TotalAssets")
-            total_assets_tag_str = unicode(total_assets_tag.string).lstrip().rstrip()
-            mutual_fund_inst.fund_size = float(total_assets_tag_str[0:total_assets_tag_str.find(' ')])
-            logger.debug("Save fund size: %f million" % mutual_fund_inst.fund_size)
-        except:
-            mutual_fund_inst.fund_size = 0
-            logger.error("Error reading fund size of fund %s" % mutual_fund_inst.fund_name)
+            # Save fund size
+            try:
+                total_assets_tag = mutual_fund_info_head_soup.find("span", vkey="TotalAssets")
+                total_assets_tag_str = unicode(total_assets_tag.string).lstrip().rstrip()
+                mutual_fund_inst.fund_size = float(total_assets_tag_str[0:total_assets_tag_str.find(' ')])
+                logger.debug("Save fund size: %f million" % mutual_fund_inst.fund_size)
+            except:
+                mutual_fund_inst.fund_size = 0
+                logger.error("Error reading fund size of fund %s" % mutual_fund_inst.fund_name)
 
-        # Save MER
-        try:
-            mer_tag = mutual_fund_info_head_soup.find("span", vkey="ExpenseRatio")
-            mer_tag_str = unicode(mer_tag.string).lstrip().rstrip()
-            mutual_fund_inst.mer = float(mer_tag_str[0:mer_tag_str.find('%')])
-            logger.debug("Save fund MER: %f" % mutual_fund_inst.mer)
-        except:
-            mutual_fund_inst.mer = 0
-            logger.error("Error reading MER of fund %s" % mutual_fund_inst.fund_name)
+            # Save MER
+            try:
+                mer_tag = mutual_fund_info_head_soup.find("span", vkey="ExpenseRatio")
+                mer_tag_str = unicode(mer_tag.string).lstrip().rstrip()
+                mutual_fund_inst.mer = float(mer_tag_str[0:mer_tag_str.find('%')])
+                logger.debug("Save fund MER: %f" % mutual_fund_inst.mer)
+            except:
+                mutual_fund_inst.mer = 0
+                logger.error("Error reading MER of fund %s" % mutual_fund_inst.fund_name)
 
-        # Save Status
-        try:
-            status_tag = mutual_fund_info_head_soup.find("span", vkey="Status")
-            status_tag_str = unicode(status_tag.string).lstrip().rstrip()
-            mutual_fund_inst.status = status_tag_str
-            logger.debug("Save fund status: %s" % mutual_fund_inst.status)
-        except:
-            mutual_fund_inst.status = "open"
-            logger.error("Error reading Status of fund %s" % mutual_fund_inst.fund_name)
+            # Save Status
+            try:
+                status_tag = mutual_fund_info_head_soup.find("span", vkey="Status")
+                status_tag_str = unicode(status_tag.string).lstrip().rstrip()
+                mutual_fund_inst.status = status_tag_str
+                logger.debug("Save fund status: %s" % mutual_fund_inst.status)
+            except:
+                mutual_fund_inst.status = "open"
+                logger.error("Error reading Status of fund %s" % mutual_fund_inst.fund_name)
 
-        # Save Min-Investment
-        try:
-            min_investment_tag = mutual_fund_info_head_soup.find("span", vkey="MinInvestment")
-            min_investment_tag_str = unicode(min_investment_tag.string).lstrip().rstrip()
-            mutual_fund_inst.min_inve_initial = int(min_investment_tag_str.replace(',',''))
-            logger.debug("Save fun minimum investment: %d" % mutual_fund_inst.min_inve_initial)
-        except:
-            mutual_fund_inst.min_inve_initial = 0
-            logger.error("Error reading Min Invest of fund %s" % mutual_fund_inst.fund_name)
+            # Save Min-Investment
+            try:
+                min_investment_tag = mutual_fund_info_head_soup.find("span", vkey="MinInvestment")
+                min_investment_tag_str = unicode(min_investment_tag.string).lstrip().rstrip()
+                mutual_fund_inst.min_inve_initial = int(min_investment_tag_str.replace(',',''))
+                logger.debug("Save fun minimum investment: %d" % mutual_fund_inst.min_inve_initial)
+            except:
+                mutual_fund_inst.min_inve_initial = 0
+                logger.error("Error reading Min Invest of fund %s" % mutual_fund_inst.fund_name)
 
-        # Save Category
-        try:
-            category_tag = mutual_fund_info_head_soup.find("span", vkey="MorningstarCategory")
-            category_tag_str = unicode(category_tag.string).lstrip().rstrip()
-            mutual_fund_inst.category = category_tag_str
-            logger.debug("Save fund category: %s" % mutual_fund_inst.category)
-        except:
-            mutual_fund_inst.category = ""
-            logger.error("Error reading Category of fund %s" % mutual_fund_inst.fund_name)
+            # Save Category
+            try:
+                category_tag = mutual_fund_info_head_soup.find("span", vkey="MorningstarCategory")
+                category_tag_str = unicode(category_tag.string).lstrip().rstrip()
+                mutual_fund_inst.category = category_tag_str
+                logger.debug("Save fund category: %s" % mutual_fund_inst.category)
+            except:
+                mutual_fund_inst.category = ""
+                logger.error("Error reading Category of fund %s" % mutual_fund_inst.fund_name)
 
-        # Save Invest-Style
-        try:
-            invest_style_tag = mutual_fund_info_head_soup.find("span", vkey="InvestmentStyle")
-            for string in invest_style_tag.strings:
-                if len(string.lstrip().rstrip()) != 0:
-                    mutual_fund_inst.inve_style = string.lstrip().rstrip()
-                    logger.debug("Save fund invest style: %s" % mutual_fund_inst.inve_style)
-                    break
-        except:
-            mutual_fund_inst.inve_style = ""
-            logger.error("Error reading Invest Style of fund %s" % mutual_fund_inst.fund_name)
+            # Save Invest-Style
+            try:
+                invest_style_tag = mutual_fund_info_head_soup.find("span", vkey="InvestmentStyle")
+                for string in invest_style_tag.strings:
+                    if len(string.lstrip().rstrip()) != 0:
+                        mutual_fund_inst.inve_style = string.lstrip().rstrip()
+                        logger.debug("Save fund invest style: %s" % mutual_fund_inst.inve_style)
+                        break
+            except:
+                mutual_fund_inst.inve_style = ""
+                logger.error("Error reading Invest Style of fund %s" % mutual_fund_inst.fund_name)
 
 
     def __save_mutual_fund_obj_strategy_portion(self, mutual_fund_inst, get_parameter_dict):
@@ -649,8 +686,7 @@ class Downloader:
                                                           "net_asset": asset_list[i]}
         logger.debug("Save annual performance: %s" % mutual_fund_inst.annual_perf)
 
-
-    def save_all_mutual_fund_info(self):
+    def save_all_mutual_fund_info(self, exporter):
 
         if os.path.exists(self.mutual_fund_id_list_file_name) and os.path.isfile(self.mutual_fund_id_list_file_name):
             logger.debug("Read mutual fund id list from %s" % self.mutual_fund_id_list_file_name)
@@ -666,14 +702,14 @@ class Downloader:
             self.__write_mutual_fund_id_list_to_file()
         print "Total %d Mutual Fund need to be downloaded." % len(self.mutual_fund_id_list)
 
-        count = 0
-        for fund_id in self.mutual_fund_id_list:
-            self.__save_mutual_fund_info(fund_id)
-            count += 1
-            sys.stdout.write("\rNow processing #%d Mutual Fund" % count)
-            sys.stdout.flush()
-        print "Successfully download %d Mutual Fund" % len(self.mutual_fund_id_list)
+        thread_inst_list = []
+        for i in range(20):
+            thread_inst = threading.Thread(name=str(i), target=thread_func, args=(self, i, exporter))
+            thread_inst_list.append(thread_inst)
+            thread_inst.setDaemon(True)
+            thread_inst.start()
+        for inst in thread_inst_list:
+            inst.join()
 
 if __name__ == '__main__':
-    downloader = Downloader()
-    downloader._Downloader__save_mutual_fund_info("F00000V7J8")
+    pass
